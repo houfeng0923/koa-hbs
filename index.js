@@ -40,14 +40,19 @@ function merge (obj1, obj2) {
 };
 
 /**
- * file reader returning a thunk
+ * file reader returning a promise
  * @param filename {String} Name of file to read
  */
 
 function read (filename) {
-  return function (done) {
-    fs.readFile(filename, {encoding: 'utf8'}, done);
-  };
+  return new Promise((resolve, reject) => {
+    fs.readFile(filename, {encoding: 'utf8'}, (err, content) => {
+      if (err) {
+        return reject(err);
+      }  
+      resolve(content); 
+    });
+  });
 };
 
 /**
@@ -178,9 +183,9 @@ Hbs.prototype.middleware = function (options) {
 
   let render = this.createRenderer();
 
-  return function *(next) {
-    this.render = render;
-    yield* next;
+  return async function (ctx, next) {
+    ctx.render = render.bind(ctx);
+    await next();
   };
 };
 
@@ -191,7 +196,7 @@ Hbs.prototype.middleware = function (options) {
 Hbs.prototype.createRenderer = function () {
   let hbs = this;
 
-  return function *(tpl, locals) {
+  return async function (tpl, locals) {
     let tplPath = hbs.getTemplatePath(tpl),
       template, rawTemplate, layoutTemplate;
 
@@ -210,12 +215,12 @@ Hbs.prototype.createRenderer = function () {
     // Initialization... move these actions into another function to remove
     // unnecessary checks
     if (hbs.disableCache || !hbs.partialsRegistered && hbs.partialsPath !== '') {
-      yield hbs.registerPartials();
+      await hbs.registerPartials();
     }
 
     // Load the template
     if (hbs.disableCache || !hbs.cache[tpl]) {
-      rawTemplate = yield read(tplPath);
+      rawTemplate = await read(tplPath);
       hbs.cache[tpl] = {
         template: hbs.handlebars.compile(rawTemplate)
       };
@@ -229,7 +234,7 @@ Hbs.prototype.createRenderer = function () {
         }
 
         if (layout !== false) {
-          let rawLayout = yield hbs.loadLayoutFile(layout);
+          let rawLayout = await hbs.loadLayoutFile(layout);
           hbs.cache[tpl].layoutTemplate = hbs.handlebars.compile(rawLayout);
         }
         else {
@@ -242,7 +247,7 @@ Hbs.prototype.createRenderer = function () {
     layoutTemplate = hbs.cache[tpl].layoutTemplate;
 
     if (!layoutTemplate) {
-      layoutTemplate = yield hbs.getLayoutTemplate();
+      layoutTemplate = await hbs.getLayoutTemplate();
     }
 
     // Add the current koa context to templateOptions.data to provide access
@@ -255,7 +260,7 @@ Hbs.prototype.createRenderer = function () {
 
     // Run the compiled templates
     locals.body = template(locals, hbs.templateOptions);
-    this.body = layoutTemplate(locals, hbs.templateOptions);
+    this.body = layoutTemplate(locals, hbs.templateOptions);  
   };
 };
 
@@ -274,9 +279,9 @@ Hbs.prototype.getLayoutPath = function (layout) {
 /**
  * Lazy load default layout in cache.
  */
-Hbs.prototype.getLayoutTemplate = function* () {
+Hbs.prototype.getLayoutTemplate = async function () {
   if (this.disableCache || !this.layoutTemplate) {
-    this.layoutTemplate = yield this.cacheLayout();
+    this.layoutTemplate = await this.cacheLayout();
   }
 
   return this.layoutTemplate;
@@ -289,7 +294,7 @@ Hbs.prototype.getLayoutTemplate = function* () {
 Hbs.prototype.cacheLayout = function (layout) {
   let hbs = this;
 
-  return function* () {
+  async function cacheLayout () {
     // Create a default layout to always use
     if (!layout && !hbs.defaultLayout) {
       return hbs.handlebars.compile('{{{body}}}');
@@ -303,7 +308,7 @@ Hbs.prototype.cacheLayout = function (layout) {
     let layoutTemplate;
 
     try {
-      let rawLayout = yield hbs.loadLayoutFile(layout);
+      let rawLayout = await hbs.loadLayoutFile(layout);
       layoutTemplate = hbs.handlebars.compile(rawLayout);
     }
     catch (err) {
@@ -312,6 +317,8 @@ Hbs.prototype.cacheLayout = function (layout) {
 
     return layoutTemplate;
   };
+
+  return cacheLayout();
 };
 
 /**
@@ -319,11 +326,8 @@ Hbs.prototype.cacheLayout = function (layout) {
  */
 
 Hbs.prototype.loadLayoutFile = function (layout) {
-  let hbs = this;
-  return function (done) {
-    let file = hbs.getLayoutPath(layout);
-    read(file)(done);
-  };
+  let file = this.getLayoutPath(layout);
+  return read(file); 
 };
 
 /**
@@ -353,19 +357,24 @@ Hbs.prototype.registerPartials = function () {
     this.partialsPath = [this.partialsPath];
   }
 
-  /* thunk creator for readdirp */
+  /* promise creator for readdirp */
   var readdir = function (root) {
-    return function (done) {
+    return new Promise((resolve, reject) => {
       glob('**/*' + self.extname, {
-        cwd: root,
-      }, done);
-    };
+        cwd: root
+      }, (err, files) => {
+        if (err) {
+          return reject(err); 
+        }
+        resolve(files); 
+      });
+    });
   };
 
   /* Read in partials and register them */
-  return function* () {
+  async function registerPartials () {
     try {
-      let resultList = yield self.partialsPath.map(readdir),
+      let resultList = await Promise.all(self.partialsPath.map(readdir)),
         files = [],
         names = [],
         partials,
@@ -384,7 +393,7 @@ Hbs.prototype.registerPartials = function () {
       });
 
       // Read all the partial from disk
-      partials = yield files.map(read);
+      partials = await Promise.all(files.map(read));
 
       for (i = 0; i !== partials.length; i++) {
         self.registerPartial(names[i], partials[i]);
@@ -396,8 +405,8 @@ Hbs.prototype.registerPartials = function () {
       console.error('Error caught while registering partials');
       console.error(e);
     }
-
   };
+  return registerPartials();
 };
 
 Hbs.prototype.getTemplatePath = function (tpl) {
